@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Environnement Python
+.venv/
+__pycache__/
+*.pyc
+
+# Données réelles générées/déposées à l'exécution (pas du code) : PDF/notes
+# en attente, archives, cache de classification Mistral.
+inbox_greenunivers/
+inbox_pdf_solo/
+archive/
+.cache/
+
+# Divers
+pip_install_log.txt
