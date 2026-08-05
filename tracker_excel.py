@@ -1,16 +1,16 @@
-"""Intégration de la veille validée (texte final, potentiellement corrigé à
-la main par l'utilisateur) dans le classeur Excel de suivi manuel préexistant
-(Veille_marché_ENR.xlsx, onglet "Suivi veille") : une ligne par actualité,
-rangée dans la bonne colonne thème + acteur/sujet, avec les liens sources.
+"""Intégration de la veille validée dans le classeur Excel de suivi manuel
+préexistant (Veille_marché_ENR.xlsx, onglet "Suivi veille") : une ligne par
+actualité, rangée dans la bonne colonne thème + acteur/sujet, avec les liens
+sources.
 
-Le texte est parsé au format produit par main._format_draft (bloc par actu :
-"[THEME] Titre" / résumé / "Source : ..."), donc robuste à un simple
-copier-coller même après édition manuelle du contenu (titres/résumés
-modifiés, actus ajoutées/supprimées) tant que la structure des blocs est
-conservée.
+Reçoit directement les entrées structurées de l'aperçu (title/summary/
+source_line, potentiellement éditées à la main dans la webapp — voir
+webapp._parse_edited_entries), sans repasser par le texte formaté ni un
+re-parsing : plus robuste (aucune dépendance à la mise en forme exacte du
+texte) et évite un aller-retour inutile structuré -> texte -> structuré.
 """
-import re
 import shutil
+import re
 from copy import copy
 from datetime import date, datetime
 from pathlib import Path
@@ -27,43 +27,7 @@ from config import (
 )
 from summarize_mistral import classify_for_tracker
 
-_ENTRY_HEADER_RE = re.compile(r"^\[(?P<theme>[^\]]+)\]\s*(?P<title>.+)$")
 _URL_RE = re.compile(r"https?://\S+")
-
-
-def parse_draft_text(text: str) -> list[dict]:
-    """Repère chaque actu par sa ligne d'en-tête "[THEME] Titre" et la clôt à
-    la ligne "Source : ...", indépendamment des lignes vides (il n'y en a pas
-    forcément entre un titre de section "Priorité 1 :" et la première actu).
-    Toute ligne hors de cette structure (en-tête "Veille hebdo — ...", titres
-    de section, actu sans "Source :" en fin) est silencieusement ignorée
-    plutôt que de faire planter l'intégration sur un texte édité à la main."""
-    entries = []
-    current = None  # {"theme_tag", "title", "summary_lines"}
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        header = _ENTRY_HEADER_RE.match(line)
-        if header:
-            current = {
-                "theme_tag": header.group("theme").strip(),
-                "title": header.group("title").strip(),
-                "summary_lines": [],
-            }
-            continue
-        if line.lower().startswith("source") and current is not None:
-            entries.append({
-                "theme_tag": current["theme_tag"],
-                "title": current["title"],
-                "summary": " ".join(current["summary_lines"]).strip(),
-                "source_line": line,
-            })
-            current = None
-            continue
-        if current is not None:
-            current["summary_lines"].append(line)
-    return entries
 
 
 def extract_links(source_line: str) -> list[str]:
@@ -98,16 +62,40 @@ def _copy_row_style(ws, template_row: int, target_row: int, max_col: int) -> Non
         ws.row_dimensions[target_row].height = src_height
 
 
+def _find_existing_actor_row(ws, acteur: str, max_row: int) -> int | None:
+    """Cherche, parmi les lignes 2..max_row, une ligne déjà associée à cet
+    acteur (comparaison insensible à la casse/aux espaces) — pour un acteur
+    récurrent (ex. "Nadara"), on la réutilise au lieu d'empiler une nouvelle
+    ligne à chaque mention (voir append_entries). Ne s'applique jamais à une
+    ligne "DIVERS/ <sujet>" : la comparaison est une égalité stricte avec le
+    nom d'acteur, jamais un sous-texte. Ne touche pas à l'historique déjà
+    présent avant ce run : une éventuelle répétition déjà existante dans le
+    classeur (ex. EDF sur plusieurs lignes) n'est pas fusionnée rétroactivement,
+    seules les nouvelles validations réutilisent une ligne trouvée."""
+    target = acteur.strip().casefold()
+    for r in range(2, max_row + 1):
+        val = ws.cell(row=r, column=TRACKER_COL_THEMES).value
+        if isinstance(val, str) and val.strip().casefold() == target:
+            return r
+    return None
+
+
 def append_entries(
     entries: list[dict], run_date: date, excel_path: Path = TRACKER_XLSX_PATH
 ) -> list[dict]:
     """entries : dicts avec title/summary/source_line/links/excel_theme/
-    acteur/sujet_divers (voir integrate_draft_text). Sauvegarde le classeur
+    acteur/sujet_divers (voir integrate_draft_entries). Sauvegarde le classeur
     avant modification (fichier tenu à la main depuis des années, une
-    corruption serait coûteuse à rattraper), ajoute une ligne par entrée à la
-    fin de l'onglet (mise en forme reprise de la dernière ligne existante),
-    puis sauvegarde. Retourne les lignes ajoutées pour affichage/vérification
-    par l'utilisateur."""
+    corruption serait coûteuse à rattraper), puis pour chaque entrée :
+    - si un acteur est identifié ET qu'une ligne existante à son nom a la
+      case du thème ciblé encore vide (tableau croisé acteur x thème), on
+      réutilise cette ligne au lieu d'en créer une nouvelle (voir
+      _find_existing_actor_row) — met aussi à jour sa date et complète ses
+      colonnes LIENS encore vides sans écraser des liens déjà présents ;
+    - sinon (pas d'acteur, pas de ligne existante, ou case déjà occupée par
+      une actu précédente — cas volontairement laissé simple pour l'instant)
+      on ajoute une nouvelle ligne à la fin, comme avant.
+    Retourne les lignes touchées pour affichage/vérification par l'utilisateur."""
     if not excel_path.exists():
         raise FileNotFoundError(f"Classeur introuvable : {excel_path}")
 
@@ -121,53 +109,61 @@ def append_entries(
     template_row = ws.max_row
     max_col = ws.max_column
     added = []
-    row = template_row + 1
+    next_new_row = template_row + 1
     for e in entries:
-        _copy_row_style(ws, template_row, row, max_col)
-
         acteur = e.get("acteur")
         sujet = e.get("sujet_divers")
         theme_label = acteur or (f"DIVERS/ {sujet}" if sujet else "DIVERS")
-        ws.cell(row=row, column=TRACKER_COL_THEMES, value=theme_label)
-        ws.cell(row=row, column=TRACKER_COL_DATE, value=run_date)
-
         theme_col = TRACKER_THEME_COLUMNS.get(e["excel_theme"], TRACKER_THEME_COLUMNS["DIVERS"])
-        ws.cell(row=row, column=theme_col, value=f"{e['title']}\n{e['summary']}")
-
         links = e.get("links") or []
-        if links:
-            for link, col in zip(links, TRACKER_LIENS_COLUMNS):
+
+        existing_row = _find_existing_actor_row(ws, acteur, ws.max_row) if acteur else None
+        if existing_row and not ws.cell(row=existing_row, column=theme_col).value:
+            row = existing_row
+            ws.cell(row=row, column=theme_col, value=f"{e['title']}\n{e['summary']}")
+            ws.cell(row=row, column=TRACKER_COL_DATE, value=run_date)
+            empty_link_cols = [c for c in TRACKER_LIENS_COLUMNS if not ws.cell(row=row, column=c).value]
+            for link, col in zip(links, empty_link_cols):
                 ws.cell(row=row, column=col, value=link)
         else:
-            ws.cell(row=row, column=TRACKER_LIENS_COLUMNS[0], value=LIENS_PLACEHOLDER)
+            row = next_new_row
+            _copy_row_style(ws, template_row, row, max_col)
+            ws.cell(row=row, column=TRACKER_COL_THEMES, value=theme_label)
+            ws.cell(row=row, column=TRACKER_COL_DATE, value=run_date)
+            ws.cell(row=row, column=theme_col, value=f"{e['title']}\n{e['summary']}")
+            if links:
+                for link, col in zip(links, TRACKER_LIENS_COLUMNS):
+                    ws.cell(row=row, column=col, value=link)
+            else:
+                ws.cell(row=row, column=TRACKER_LIENS_COLUMNS[0], value=LIENS_PLACEHOLDER)
+            next_new_row += 1
 
         added.append({
             "row": row, "theme_label": theme_label, "excel_theme": e["excel_theme"],
             "title": e["title"], "links": links,
         })
-        row += 1
 
     wb.save(excel_path)
     return added
 
 
-def integrate_draft_text(
-    text: str, run_date: date, excel_path: Path = TRACKER_XLSX_PATH
+def integrate_draft_entries(
+    entries: list[dict], run_date: date, excel_path: Path = TRACKER_XLSX_PATH
 ) -> list[dict]:
-    """Point d'entrée unique utilisé par la web app : parse le texte collé,
-    classe chaque actu (thème Excel + acteur/sujet) via Mistral, puis ajoute
-    les lignes au classeur. Renvoie la liste vide si rien d'exploitable n'a
-    été trouvé dans le texte (au lieu de planter), pour laisser l'appelant
-    afficher un message clair plutôt qu'une erreur serveur."""
-    parsed = parse_draft_text(text)
-    if not parsed:
+    """Point d'entrée unique utilisé par la webapp (voir webapp._integrate_to_excel) :
+    entries = les entrées structurées de l'aperçu déjà validées par
+    l'utilisateur (title/summary/source_line). Classe chaque actu (thème
+    Excel + acteur/sujet) via Mistral, puis ajoute les lignes au classeur.
+    Renvoie la liste vide si `entries` est vide (aperçu validé sans aucune
+    actu retenue), au lieu de planter."""
+    if not entries:
         return []
 
     classifications = classify_for_tracker(
-        [{"title": p["title"], "summary": p["summary"]} for p in parsed]
+        [{"title": e["title"], "summary": e["summary"]} for e in entries]
     )
     combined = [
-        {**p, **c, "links": extract_links(p["source_line"])}
-        for p, c in zip(parsed, classifications)
+        {**e, **c, "links": extract_links(e["source_line"])}
+        for e, c in zip(entries, classifications)
     ]
     return append_entries(combined, run_date, excel_path)

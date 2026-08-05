@@ -1,0 +1,5 @@
+# Dépendances de développement uniquement (packaging en .exe) — voir
+# build_exe.bat. Pas nécessaire pour faire tourner l'app en Python normal :
+# ce sont les dépendances de requirements.txt qui suffisent pour ça.
+-r requirements.txt
+pyinstaller>=6.10

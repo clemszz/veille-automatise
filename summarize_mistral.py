@@ -18,6 +18,39 @@ from config import MISTRAL_API_KEY, MISTRAL_MODEL
 
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 
+# Liste fermée des thématiques techniques du périmètre ENGIE Green, partagée
+# entre le thème affiché dans la veille (VEILLE_THEME_OPTIONS, complétée par
+# CONCURRENCE + les thèmes "internes" ci-dessous) et le classement dans le
+# classeur Excel de suivi (TRACKER_THEME_OPTIONS, complétée par DIVERS — voir
+# plus bas). _ENERGY_THEME_OPTIONS reste inchangée : elle correspond 1:1 aux
+# colonnes déjà présentes dans le classeur Excel (TRACKER_THEME_COLUMNS,
+# config.py) — y ajouter un thème casserait ce mapping.
+_ENERGY_THEME_OPTIONS = [
+    "EOLIEN", "AGRIVOLTAÏSME", "SOLAIRE", "BATTERIES / STOCKAGE", "HYBRIDE",
+    "HYDROELECTRIQUE", "PARTAGE DE LA VALEUR", "REPOWERING",
+]
+# Thèmes propres à la veille (pas de colonne Excel associée) : actus qui
+# concernent le groupe ENGIE ou sa filiale renewables, ou l'actu générale du
+# secteur, plutôt qu'une techno ou un mouvement de concurrent.
+_VEILLE_ONLY_THEME_OPTIONS = ["ENGIE R&B", "ENGIE", "ACTU GENERALE ENERGIE"]
+VEILLE_THEME_OPTIONS = _ENERGY_THEME_OPTIONS + ["CONCURRENCE"] + _VEILLE_ONLY_THEME_OPTIONS
+
+
+def _valid_veille_theme(theme: str | None) -> str:
+    """Filet de sécurité : un thème hors de la liste fermée (halluciné par le
+    modèle malgré la consigne, ou absent) retombe sur "CONCURRENCE" plutôt \
+que de laisser passer un tag libre — voir VEILLE_THEME_OPTIONS/THEME_BLOCK."""
+    return theme if theme in VEILLE_THEME_OPTIONS else "CONCURRENCE"
+
+
+def _valid_comm_theme(theme: str | None) -> str:
+    """Même principe que _valid_veille_theme mais pour les PDF de
+    communication interne ENGIE (voir classify_comm_notes) : liste fermée à
+    ces 3 valeurs seulement (pas les 12 de VEILLE_THEME_OPTIONS) — un thème
+    hors liste retombe sur "ACTU GENERALE ENERGIE", la plus générique des
+    trois."""
+    return theme if theme in _VEILLE_ONLY_THEME_OPTIONS else "ACTU GENERALE ENERGIE"
+
 # Blocs communs entre SYSTEM_PROMPT (articles scrapés Tecsol/PV Magazine,
 # in_scope + priorité jugés) et GREENUNIVERS_SYSTEM_PROMPT (PDF GreenUnivers,
 # déjà sélectionnés par l'utilisateur donc in_scope pas jugé, mais la
@@ -46,13 +79,37 @@ quotidien mais plus secondaires ou locales (contentieux, faits divers \
 sectoriels, annonces mineures, produits, détails techniques ou \
 réglementaires qui intéressent les équipes terrain plus que la direction)."""
 
-THEME_BLOCK = """THÈME (un tag court affiché à côté de chaque article, \
-indépendant de la priorité P1/P2 ci-dessus) : un ou deux mots en MAJUSCULES \
-qui résument le sujet de l'article, comme le ferait un humain qui trie ses \
-actus au fil de l'eau — pas de liste figée, pas de règle stricte, utilise \
-ton jugement. Exemples déjà vus pour donner le ton (à titre indicatif, libre \
-d'en utiliser d'autres) : FRANCE, EUROPE, CONCURRENCE, MARCHÉ, RTE, SOLAIRE, \
-HYDROÉLECTRICITÉ, DÉCARBONATION INDUSTRIELLE, IA."""
+THEME_BLOCK = """THÈME (un tag affiché à côté de chaque article, indépendant \
+de la priorité P1/P2 ci-dessus) : choisis EXACTEMENT une valeur parmi cette \
+liste fermée (recopie-la telle quelle, n'invente jamais un autre libellé) : \
+""" + ", ".join(f'"{t}"' for t in VEILLE_THEME_OPTIONS) + """.
+Toute actu doit être rattachée à l'une de ces valeurs, y compris une actu de \
+marché/réglementation transverse qui ne porte pas sur une seule techno :
+- Si l'actu touche plusieurs thèmes techniques (ex. projet solaire + \
+stockage), choisis celui qui domine réellement le sujet de l'actu.
+- "ENGIE R&B" : l'actu concerne directement ENGIE R&B (la filiale renewables \
+du groupe ENGIE, anciennement appelée ENGIE Green) elle-même — ses propres \
+projets, résultats, décisions, nominations, communication. Priorité sur les \
+thèmes techniques ci-dessus quand ENGIE R&B est le sujet principal.
+- "ENGIE" : l'actu concerne le groupe ENGIE au sens large (au-delà de la \
+seule filiale renewables) — stratégie groupe, résultats consolidés, autres \
+branches (réseaux, thermique, services...), communication corporate.
+- "ACTU GENERALE ENERGIE" : actu de contexte sectoriel qui ne cible ni un \
+acteur précis ni une techno du périmètre (ex. tendance macro de la \
+transition énergétique, actu géopolitique énergie, données de conjoncture \
+générales) — à ne choisir que si aucun autre thème plus précis ne s'applique.
+- "CONCURRENCE" est réservé aux actus dont le sujet principal est un \
+mouvement d'un acteur concurrent (levée de fonds, cession, nomination, \
+restructuration, fusion/acquisition...) sans qu'un projet ou une techno \
+précise du périmètre domine le sujet. Si un concurrent agit sur une techno \
+précise du périmètre (ex. il construit/vend un parc éolien), choisis cette \
+techno plutôt que "CONCURRENCE" — "CONCURRENCE" décrit le mouvement \
+d'entreprise en lui-même, pas n'importe quelle actu impliquant un acteur \
+nommé.
+- Pour une actu de marché ou réglementaire qui cible un acteur ou une techno \
+du périmètre malgré tout, choisis la techno la plus concernée par l'actu ; \
+si plusieurs le sont à parts égales, choisis celle mise en avant en premier \
+dans le texte source plutôt que de forcer un choix arbitraire."""
 
 STYLE_BLOCK = """STYLE :
 - title : une REFORMULATION synthétique et percutante à toi, jamais un \
@@ -96,7 +153,14 @@ de l'Ademe) compte aussi.
 du périmètre en passant :
 - Solaire de petite taille (< 1 MW), y compris l'agrivoltaïsme de petite taille.
 - Solaire en toiture ou sur bâtiment, quelle que soit la taille du bâtiment \
-(résidentiel, tertiaire, industriel, agricole).
+(résidentiel, tertiaire, industriel, agricole) — y compris un article \
+réglementaire/politique dont le sujet PRINCIPAL est ce segment (ex. \
+"moratoire", appels d'offres ou tarifs spécifiques au solaire sur bâtiment/ \
+toiture/ombrières, réaction de développeurs de ce segment) : la clause \
+générale ci-dessous sur le cadre réglementaire du périmètre ne couvre QUE le \
+solaire au sol/éolien/stockage/hydro, jamais un texte centré sur le \
+bâtiment/la toiture/les ombrières même s'il mentionne aussi la filière \
+solaire au sens large.
 - Autoconsommation, individuelle ou collective, quel que soit le porteur \
 (particulier, entreprise, collectivité) : hors périmètre même si le volume \
 en MW/MWc est mentionné.
@@ -283,7 +347,7 @@ def classify_articles(new_articles: list[dict]) -> dict[str, dict]:
         results[key] = {
             "in_scope": bool(item.get("in_scope")),
             "priority": item.get("priority") or "",
-            "theme": item.get("theme") or "AUTRE",
+            "theme": _valid_veille_theme(item.get("theme")),
             "title": _clean_text(item.get("title") or ""),
             "summary": _clean_text(item.get("summary") or ""),
         }
@@ -351,28 +415,26 @@ def classify_greenunivers_notes(notes: list[dict]) -> dict[str, dict]:
             continue
         results[key] = {
             "priority": item.get("priority") or "P2",
-            "theme": item.get("theme") or "AUTRE",
+            "theme": _valid_veille_theme(item.get("theme")),
             "title": _clean_text(item.get("title") or ""),
             "summary": _clean_text(item.get("summary") or ""),
         }
 
     for n in notes:
-        results.setdefault(n["key"], {"priority": "P2", "theme": "AUTRE", "title": n.get("title", ""), "summary": ""})
+        results.setdefault(n["key"], {"priority": "P2", "theme": "CONCURRENCE", "title": n.get("title", ""), "summary": ""})
 
     return results
 
 
-SOLO_SYSTEM_PROMPT = """Tu rédiges, pour l'onglet "Résumés PDF" de l'outil de \
-veille ENGIE Green, un titre et un résumé pour chaque article fourni. \
+SOLO_SYSTEM_PROMPT = """Tu rédiges, pour StratIA (l'outil de veille ENGIE \
+Green, scraping automatique désactivé), un titre et un résumé pour chaque \
+article fourni. \
 Contrairement à la veille hebdomadaire classique, NE JUGE PAS si l'article \
 est dans le périmètre métier : l'utilisateur a déjà choisi ces articles en \
 les déposant, ton seul travail est de les rédiger, pas de les filtrer. \
 Traite donc INCONDITIONNELLEMENT chaque article de la liste.
 
-THÈME : un ou deux mots en MAJUSCULES qui résument le sujet de l'article \
-(même logique que pour la veille hebdomadaire) : pas de liste figée, utilise \
-ton jugement (ex. FRANCE, EUROPE, CONCURRENCE, MARCHÉ, RTE, SOLAIRE, \
-HYDROÉLECTRICITÉ, DÉCARBONATION INDUSTRIELLE, IA).
+""" + THEME_BLOCK + """
 
 STYLE :
 - title : une REFORMULATION synthétique et percutante à toi, jamais un \
@@ -397,8 +459,9 @@ def summarize_solo(articles: list[dict]) -> dict[str, dict]:
     """articles : liste de dicts avec au moins key/title/content ou excerpt \
 (voir manual_notes.fetch). Retourne {key: {theme, title, summary}} SANS \
 décision in_scope/priorité : contrairement à classify_articles, tout article \
-fourni est traité (l'onglet "Résumés PDF" n'a pas vocation à filtrer, voir
-pdf_solo.py)."""
+fourni est traité — utilisé par main.build_draft quand le scraping
+automatique est désactivé (voir webapp.py, bouton "Activer/désactiver le
+scraping automatique")."""
     if not articles:
         return {}
     if not MISTRAL_API_KEY:
@@ -443,13 +506,109 @@ pdf_solo.py)."""
         if not key:
             continue
         results[key] = {
-            "theme": item.get("theme") or "AUTRE",
+            "theme": _valid_veille_theme(item.get("theme")),
             "title": _clean_text(item.get("title") or ""),
             "summary": _clean_text(item.get("summary") or ""),
         }
 
     for a in articles:
-        results.setdefault(a["key"], {"theme": "AUTRE", "title": a.get("title", ""), "summary": ""})
+        results.setdefault(a["key"], {"theme": "CONCURRENCE", "title": a.get("title", ""), "summary": ""})
+
+    return results
+
+
+COMM_SYSTEM_PROMPT = """Tu prépares, pour StratIA (l'outil de veille ENGIE \
+Green), la synthèse des documents de communication officielle/interne du \
+groupe ENGIE fournis par le service Communication.
+
+Les documents fournis ici sont des PDF de communication (communiqués, notes \
+internes, annonces...) déposés manuellement : l'utilisateur a DÉJÀ décidé \
+qu'ils sont à inclure en les déposant — NE JUGE PAS leur pertinence, traite \
+INCONDITIONNELLEMENT chaque document de la liste. Ton seul travail est de \
+choisir le thème et de rédiger titre + résumé (jamais la priorité, toujours \
+fixée à "P1" ailleurs dans le code, pas de ta part).
+
+THÈME : choisis EXACTEMENT une valeur parmi cette liste fermée (recopie-la \
+telle quelle, n'invente jamais un autre libellé) : """ + ", ".join(f'"{t}"' for t in _VEILLE_ONLY_THEME_OPTIONS) + """.
+- "ENGIE R&B" : le document concerne directement ENGIE R&B (la filiale \
+renewables du groupe, anciennement appelée "ENGIE Green") elle-même — ses \
+projets, résultats, décisions, nominations, communication propres.
+- "ENGIE" : le document concerne le groupe ENGIE au sens large (au-delà de \
+la seule filiale renewables) — stratégie groupe, résultats consolidés, \
+autres branches (réseaux, thermique, services...), communication corporate.
+- "ACTU GENERALE ENERGIE" : contexte sectoriel général qui ne cible \
+précisément ni ENGIE ni sa filiale (ex. tendance macro du secteur, actu \
+réglementaire générale relayée en interne) — à ne choisir que si les deux \
+autres valeurs ne s'appliquent clairement pas.
+
+""" + STYLE_BLOCK + """
+
+Réponds UNIQUEMENT avec un objet JSON de la forme :
+{"articles": [{"key": "<reprends exactement la clé fournie>", "theme": \
+"ENGIE", "title": "...", "summary": "..."}, ...]}
+Un élément par document reçu, dans le même ordre, en reprenant exactement la \
+clé ("key") fournie pour chacun."""
+
+
+def classify_comm_notes(notes: list[dict]) -> dict[str, dict]:
+    """notes : PDF de communication interne/officielle ENGIE (voir
+    manual_notes.fetch sur config.INBOX_COMM), déjà sélectionnés par
+    l'utilisateur en les déposant. Ne décide ni in_scope (toujours true) ni
+    priorité (toujours "P1", fixée par l'appelant — voir main.build_draft) :
+    seul le thème (parmi les 3 valeurs "communication", voir
+    _valid_comm_theme) et le titre/résumé sont à la charge de Mistral ici —
+    voir COMM_SYSTEM_PROMPT. Retourne {key: {theme, title, summary}}."""
+    if not notes:
+        return {}
+    if not MISTRAL_API_KEY:
+        raise RuntimeError(
+            "MISTRAL_API_KEY manquante : renseigne-la dans le fichier .env "
+            "(voir .env.example)."
+        )
+
+    payload_articles = [
+        {
+            "key": n["key"],
+            "title": n.get("title"),
+            "text": n.get("content") or n.get("excerpt") or "",
+        }
+        for n in notes
+    ]
+
+    resp = requests.post(
+        MISTRAL_URL,
+        headers={
+            "Authorization": f"Bearer {MISTRAL_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": MISTRAL_MODEL,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": COMM_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(payload_articles, ensure_ascii=False, indent=2)},
+            ],
+        },
+        timeout=180,
+    )
+    resp.raise_for_status()
+    raw = resp.json()["choices"][0]["message"]["content"]
+    parsed = json.loads(raw)
+
+    results = {}
+    for item in parsed.get("articles", []):
+        key = item.get("key")
+        if not key:
+            continue
+        results[key] = {
+            "theme": _valid_comm_theme(item.get("theme")),
+            "title": _clean_text(item.get("title") or ""),
+            "summary": _clean_text(item.get("summary") or ""),
+        }
+
+    for n in notes:
+        results.setdefault(n["key"], {"theme": "ACTU GENERALE ENERGIE", "title": n.get("title", ""), "summary": ""})
 
     return results
 
@@ -518,10 +677,7 @@ sources (voir main._merge_duplicates)."""
     return groups
 
 
-TRACKER_THEME_OPTIONS = [
-    "EOLIEN", "AGRIVOLTAÏSME", "SOLAIRE", "BATTERIES / STOCKAGE", "HYBRIDE",
-    "HYDROELECTRIQUE", "PARTAGE DE LA VALEUR", "REPOWERING", "DIVERS",
-]
+TRACKER_THEME_OPTIONS = _ENERGY_THEME_OPTIONS + ["DIVERS"]
 
 TRACKER_SYSTEM_PROMPT = """Tu ranges des actualités déjà rédigées (titre + \
 résumé) dans un classeur Excel de suivi manuel tenu par ENGIE Green, pour \

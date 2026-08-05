@@ -12,10 +12,17 @@ from datetime import date
 
 import cache as article_cache
 from cache import article_key
-from config import ARCHIVE_DIR, INBOX_GREENUNIVERS, get_period
+from config import ARCHIVE_DIR, COMM_SOURCE_LABEL, INBOX_COMM, INBOX_GREENUNIVERS, get_period
 from filter_keywords import prefilter
 from sources import manual_notes, pvmagazine, tecsol
-from summarize_mistral import classify_articles, classify_greenunivers_notes, find_duplicate_groups
+from summarize_mistral import (
+    _valid_veille_theme,
+    classify_articles,
+    classify_comm_notes,
+    classify_greenunivers_notes,
+    find_duplicate_groups,
+    summarize_solo,
+)
 
 
 @dataclass
@@ -32,6 +39,7 @@ class Draft:
     period_label: str
     run_date: date
     notes: list[dict] = field(default_factory=list)  # notes/PDF GreenUnivers utilisés, pour archivage différé
+    comm_notes: list[dict] = field(default_factory=list)  # PDF de communication ENGIE utilisés, idem
     source_status: list[SourceStatus] = field(default_factory=list)
     entries: list[dict] = field(default_factory=list)  # forme structurée de `text`, pour l'édition dans la webapp
 
@@ -48,47 +56,72 @@ class Draft:
         return out
 
 
-def build_draft(run_date: date | None = None, progress_cb=None) -> Draft:
+def build_draft(
+    run_date: date | None = None,
+    progress_cb=None,
+    scraping_enabled: bool = True,
+    period_start: date | None = None,
+    period_end: date | None = None,
+) -> Draft:
     """Récupère les sources, filtre, appelle Mistral. Ne modifie rien de
     façon irréversible : les notes/PDF GreenUnivers ne sont PAS archivés ici
     (voir deliver_and_archive), pour pouvoir régénérer un aperçu sans perdre
     les fichiers déposés tant qu'ils n'ont pas été effectivement utilisés.
 
+    `period_start`/`period_end` : période à couvrir choisie manuellement dans
+    l'aperçu (voir webapp._run_generation) — remplace alors le calcul
+    automatique habituel (les 7 jours se terminant à `run_date`, voir
+    config.get_period). Pratique pour rattraper une semaine où la veille n'a
+    pas été générée : le scraping (Tecsol/PV Magazine) accepte une période de
+    n'importe quelle longueur, pas seulement 7 jours.
+
     `progress_cb`, s'il est fourni, est appelé avec (pct:int, message:str) à
     chaque grande étape — utilisé par la webapp pour afficher une vraie barre
     de progression pendant les 10-30 s de génération (voir webapp.py).
 
-    Les notes/PDF GreenUnivers ne passent PAS par le même jugement de
-    PÉRIMÈTRE que les sources scrapées (Tecsol/PV Magazine) : la sélection
-    est déjà faite par l'utilisateur au moment du dépôt (voir README
-    section 3), donc chaque PDF GreenUnivers est automatiquement
-    in_scope=true. Mistral juge en revanche réellement leur PRIORITÉ P1/P2
-    (voir classify_greenunivers_notes) : un PDF GreenUnivers n'est pas
-    forcément P1, ex. un article sur les résultats financiers d'un groupe
-    étranger reste P2."""
+    `scraping_enabled` (bouton "Activer/désactiver le scraping automatique"
+    dans la webapp) contrôle deux comportements distincts :
+    - True (par défaut) : Tecsol/PV Magazine sont scrapés et jugés
+      in_scope/priorité par Mistral (voir classify_articles) ; les PDF/liens
+      déposés dans inbox_greenunivers/ passent, eux, uniquement par un
+      jugement de PRIORITÉ (voir classify_greenunivers_notes) — la sélection
+      de périmètre est déjà faite par l'utilisateur au moment du dépôt, donc
+      chaque PDF est automatiquement in_scope=true.
+    - False : aucun scraping, on ne touche qu'aux PDF/liens déposés, et
+      Mistral ne juge alors NI le périmètre NI la priorité (voir
+      summarize_solo) — chaque élément déposé est inclus tel quel avec une
+      priorité par défaut ("P2", modifiable ensuite dans l'aperçu de la
+      webapp). Utile une semaine où on ne veut traiter que du GreenUnivers
+      sans bruit de scraping."""
     def _progress(pct, msg):
         if progress_cb:
             progress_cb(pct, msg)
 
-    run_date = run_date or date.today()
-    start, end = get_period(run_date)
+    if period_start and period_end:
+        start, end = period_start, period_end
+    else:
+        run_date = run_date or date.today()
+        start, end = get_period(run_date)
     period_label = f"du {start.strftime('%d/%m/%Y')} au {end.strftime('%d/%m/%Y')}"
     print(f"[veille] Période couverte : {period_label}")
 
     raw_articles = []
     source_status = []
-    fetchers = (("Tecsol Quotidien", tecsol.fetch), ("PV Magazine France", pvmagazine.fetch))
-    for i, (label, fetch_fn) in enumerate(fetchers):
-        _progress(5 + i * 15, f"Récupération {label}…")
-        print(f"[veille] Récupération {label}...")
-        try:
-            batch = fetch_fn(start, end)
-            print(f"[veille]   -> {len(batch)} articles publiés")
-            raw_articles.extend(batch)
-            source_status.append(SourceStatus(name=label, ok=True, count=len(batch)))
-        except Exception as exc:  # noqa: BLE001 - une source en panne ne doit pas bloquer les autres
-            print(f"[veille]   -> ÉCHEC ({exc}). On continue avec les autres sources.")
-            source_status.append(SourceStatus(name=label, ok=False, detail=str(exc)))
+    if scraping_enabled:
+        fetchers = (("Tecsol Quotidien", tecsol.fetch), ("PV Magazine France", pvmagazine.fetch))
+        for i, (label, fetch_fn) in enumerate(fetchers):
+            _progress(5 + i * 15, f"Récupération {label}…")
+            print(f"[veille] Récupération {label}...")
+            try:
+                batch = fetch_fn(start, end)
+                print(f"[veille]   -> {len(batch)} articles publiés")
+                raw_articles.extend(batch)
+                source_status.append(SourceStatus(name=label, ok=True, count=len(batch)))
+            except Exception as exc:  # noqa: BLE001 - une source en panne ne doit pas bloquer les autres
+                print(f"[veille]   -> ÉCHEC ({exc}). On continue avec les autres sources.")
+                source_status.append(SourceStatus(name=label, ok=False, detail=str(exc)))
+    else:
+        print("[veille] Scraping désactivé : Tecsol/PV Magazine ignorés, PDF/liens uniquement.")
 
     _progress(35, "Pré-filtrage par mots-clés…")
     candidates = prefilter(raw_articles)
@@ -99,17 +132,24 @@ def build_draft(run_date: date | None = None, progress_cb=None) -> Draft:
     notes = manual_notes.fetch(INBOX_GREENUNIVERS)
     print(f"[veille]   -> {len(notes)} élément(s) déposé(s)")
 
+    print("[veille] Lecture des PDF de communication ENGIE (inbox_comm/)...")
+    comm_notes = manual_notes.fetch(INBOX_COMM, default_source=COMM_SOURCE_LABEL)
+    print(f"[veille]   -> {len(comm_notes)} élément(s) déposé(s)")
+
     for a in candidates:
         a["key"] = article_key(a)
     for a in notes:
         a["key"] = article_key(a)
-    all_candidates = candidates + notes
+    for a in comm_notes:
+        a["key"] = article_key(a)
+    all_candidates = candidates + notes + comm_notes
 
     cache = article_cache.load()
     new_candidates = [a for a in candidates if a["key"] not in cache]
     new_notes = [a for a in notes if a["key"] not in cache]
+    new_comm_notes = [a for a in comm_notes if a["key"] not in cache]
     print(f"[veille] {len(all_candidates)} article(s) au total, "
-          f"{len(new_candidates) + len(new_notes)} nouveau(x) jamais classé(s) "
+          f"{len(new_candidates) + len(new_notes) + len(new_comm_notes)} nouveau(x) jamais classé(s) "
           "(le reste vient du cache local, 0 token).")
 
     if new_candidates:
@@ -118,15 +158,33 @@ def build_draft(run_date: date | None = None, progress_cb=None) -> Draft:
         cache.update(classify_articles(new_candidates))
 
     if new_notes:
-        _progress(80, f"Classement Mistral de {len(new_notes)} PDF/lien(s)…")
-        print(f"[veille] Appel à Mistral (priorité + résumé, pas de filtrage périmètre) "
-              f"pour {len(new_notes)} PDF/note(s) GreenUnivers...")
-        note_results = classify_greenunivers_notes(new_notes)
+        if scraping_enabled:
+            _progress(80, f"Classement Mistral de {len(new_notes)} PDF/lien(s)…")
+            print(f"[veille] Appel à Mistral (priorité + résumé, pas de filtrage périmètre) "
+                  f"pour {len(new_notes)} PDF/note(s) GreenUnivers...")
+            note_results = classify_greenunivers_notes(new_notes)
+        else:
+            _progress(80, f"Résumé Mistral de {len(new_notes)} PDF/lien(s) (sans jugement)…")
+            print(f"[veille] Appel à Mistral (résumé seul, ni périmètre ni priorité) "
+                  f"pour {len(new_notes)} PDF/note(s)...")
+            note_results = summarize_solo(new_notes)
+            for r in note_results.values():
+                r["priority"] = "P2"  # pas de jugement en scraping désactivé, modifiable dans l'aperçu
         for r in note_results.values():
             r["in_scope"] = True  # sélection déjà faite par l'utilisateur au dépôt
         cache.update(note_results)
 
-    if new_candidates or new_notes:
+    if new_comm_notes:
+        _progress(88, f"Classement Mistral de {len(new_comm_notes)} PDF de communication…")
+        print(f"[veille] Appel à Mistral (thème + résumé, priorité fixée à P1) "
+              f"pour {len(new_comm_notes)} PDF de communication ENGIE...")
+        comm_results = classify_comm_notes(new_comm_notes)
+        for r in comm_results.values():
+            r["priority"] = "P1"  # toujours P1, voir classify_comm_notes/README
+            r["in_scope"] = True  # sélection déjà faite par l'utilisateur au dépôt
+        cache.update(comm_results)
+
+    if new_candidates or new_notes or new_comm_notes:
         article_cache.save(cache)
 
     entries = []
@@ -140,24 +198,35 @@ def build_draft(run_date: date | None = None, progress_cb=None) -> Draft:
                 source_line = "Source : (GreenUnivers -voir pdf)"
             elif a["source"] == "GreenUnivers":
                 source_line = "Source : GreenUnivers (accès abonné)"
+            elif a["source"] == COMM_SOURCE_LABEL and is_pdf_note:
+                source_line = f"Source : ({COMM_SOURCE_LABEL} -voir pdf)"
             else:
                 source_line = f"Source : {a['source']} — {a.get('url', '')}"
             entries.append({
                 "priority": verdict.get("priority") or "P2",
-                "theme": verdict.get("theme") or "AUTRE",
+                # _valid_veille_theme protège aussi contre un thème "AUTRE"
+                # (ou tout autre libellé libre) resté dans le cache d'un run
+                # antérieur à l'introduction de la liste fermée des thèmes.
+                "theme": _valid_veille_theme(verdict.get("theme")),
                 "title": verdict.get("title") or a.get("title", ""),
                 "summary": verdict.get("summary") or "",
                 "source_line": source_line,
+                # Référence au fichier d'origine (PDF/note), pour permettre le
+                # téléchargement du PDF combiné (résumés + sources) côté
+                # webapp — absente pour les articles scrapés (Tecsol/PV Mag),
+                # qui n'ont pas de fichier local associé.
+                "_note": a if "_files" in a else None,
             })
 
     _progress(92, "Dédoublonnage…")
     entries = _merge_duplicates(entries)
+    entries.sort(key=lambda e: e["priority"] != "P1")  # P2 à la fin, tri stable (ordre conservé au sein d'un groupe)
     text = _format_draft(entries, end)
     _progress(100, "Terminé")
 
     return Draft(
         text=text, period_label=period_label, run_date=end, notes=notes,
-        source_status=source_status, entries=entries,
+        comm_notes=comm_notes, source_status=source_status, entries=entries,
     )
 
 
@@ -236,14 +305,15 @@ document entier par Mistral à chaque régénération."""
 
 
 def deliver_and_archive(draft: Draft) -> None:
-    """Sauvegarde l'archive texte et déplace les notes/PDF GreenUnivers
-    utilisés hors de l'inbox."""
+    """Sauvegarde l'archive texte et déplace les notes/PDF GreenUnivers et de
+    communication ENGIE utilisés hors de leurs inbox respectives."""
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     out_path = ARCHIVE_DIR / f"veille_{draft.run_date.isoformat()}.txt"
     out_path.write_text(draft.text, encoding="utf-8")
     print(f"[veille] Synthèse enregistrée : {out_path}")
 
     manual_notes.archive_processed(draft.notes, draft.run_date, ARCHIVE_DIR)
+    manual_notes.archive_processed(draft.comm_notes, draft.run_date, ARCHIVE_DIR, subdir="comm")
 
 
 def finalize_draft(draft: Draft, entries: list[dict]) -> str:

@@ -1,0 +1,48 @@
+STRATIA — Veille hebdo ENGIE Green — mode d'emploi
+==========================================
+
+LANCER L'APPLICATION
+---------------------
+Double-clique sur StratIA.exe. Une fenêtre noire (console) s'ouvre,
+puis ton navigateur s'ouvre automatiquement sur l'application, à l'adresse
+http://localhost:5000
+
+Pour ARRÊTER l'application : ferme simplement la fenêtre noire. Tant
+qu'elle est ouverte, l'application tourne ; si tu la fermes par erreur,
+relance juste l'exe.
+
+IMPORTANT
+---------
+- Garde StratIA.exe et le fichier .env dans le même dossier :
+  l'application a besoin des deux pour fonctionner.
+- L'application crée automatiquement, dans ce même dossier, des sous-dossiers
+  pour stocker les PDF déposés, l'historique des veilles générées, etc. Ne
+  les supprime pas si tu veux garder ton historique.
+- Chaque personne a SA PROPRE copie de l'application, dans son propre
+  dossier : ce que tu déposes/génères chez toi n'apparaît pas chez tes
+  collègues, et inversement.
+
+CHANGER LA CLÉ API MISTRAL
+---------------------------
+La clé est déjà configurée dans le fichier .env fourni. Si elle doit être
+changée un jour :
+1. Ferme l'application (ferme la fenêtre noire).
+2. Ouvre le fichier .env avec le Bloc-notes (clic droit dessus > Ouvrir
+   avec > Bloc-notes).
+3. Remplace la valeur après "MISTRAL_API_KEY=" par la nouvelle clé.
+4. Enregistre le fichier.
+5. Relance StratIA.exe.
+
+CLASSEUR EXCEL DE SUIVI (optionnel)
+-------------------------------------
+Si tu veux que l'application ajoute automatiquement chaque actu validée dans
+un classeur de suivi Excel, place un fichier nommé exactement
+"Veille_marché_ENR.xlsx" (avec un onglet "Suivi veille") dans ce même
+dossier, à côté de l'exe. Sans ce fichier, cette étape échoue simplement
+sans bloquer le reste : la synthèse est quand même enregistrée et reste
+copiable dans un mail.
+
+EN CAS DE PROBLÈME
+-------------------
+La fenêtre noire affiche les messages d'erreur éventuels : en cas de souci,
+fais une capture d'écran de cette fenêtre et transmets-la à Clément.

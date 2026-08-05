@@ -9,9 +9,19 @@ __pycache__/
 # Données réelles générées/déposées à l'exécution (pas du code) : PDF/notes
 # en attente, archives, cache de classification Mistral.
 inbox_greenunivers/
+inbox_comm/
 inbox_pdf_solo/
 archive/
 .cache/
 
+# Build de l'exe (voir build_exe.bat / package_release.bat) : régénérés à
+# chaque build, et dist_package/ contient en clair la clé API partagée
+# embarquée dans le .env livré aux collègues — ne doit jamais partir en git.
+build/
+dist/
+dist_package/
+
 # Divers
 pip_install_log.txt
+server.log
+

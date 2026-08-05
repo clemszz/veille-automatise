@@ -13,7 +13,7 @@ from datetime import date, datetime
 
 import requests
 
-USER_AGENT = "veille-engie-green/1.0"
+USER_AGENT = "stratia/1.0"
 DEFAULT_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "application/json",

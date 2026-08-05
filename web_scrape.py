@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
-USER_AGENT = "veille-engie-green/1.0"
+USER_AGENT = "stratia/1.0"
 
 
 def fetch_url_text(url: str, max_chars: int = 6000, timeout: int = 20) -> dict:

@@ -126,6 +126,24 @@ def list_pending(inbox_dir: Path) -> list[dict]:
     return items
 
 
+def delete_all_pending(inbox_dir: Path) -> int:
+    """Supprime tous les PDF/notes en attente d'un coup (+ leurs .meta.json) —
+    purge définitive utilisée par la webapp pour un dépôt laissé de côté par
+    une session précédente et jamais utilisé. Renvoie le nombre de fichiers
+    "principaux" supprimés (PDF/txt/md, sans compter les .meta.json à part)."""
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for f in list(inbox_dir.iterdir()):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() == ".json":
+            f.unlink()
+        else:
+            count += 1
+            f.unlink()
+    return count
+
+
 def delete_pending(inbox_dir: Path, filename: str) -> bool:
     """Supprime un fichier en attente (+ son .meta.json s'il existe). Refuse
     tout nom qui sortirait du dossier inbox (traversal) ou qui ne correspond
@@ -216,7 +234,12 @@ def add_web_note(inbox_dir: Path, url: str = "", text: str = "") -> None:
     )
 
 
-def fetch(inbox_dir: Path) -> list[dict]:
+def fetch(inbox_dir: Path, default_source: str = "GreenUnivers") -> list[dict]:
+    """`default_source` distingue l'origine des fichiers déposés (ex.
+    "GreenUnivers" pour inbox_greenunivers/, "Communication ENGIE" pour
+    inbox_comm/ — voir config.INBOX_COMM, main.build_draft) : ne change rien
+    à l'extraction elle-même, seulement le tag "source" attaché à chaque
+    note/PDF (repris ensuite par main.py pour construire la ligne source)."""
     inbox_dir.mkdir(parents=True, exist_ok=True)
     notes = []
 
@@ -233,7 +256,7 @@ def fetch(inbox_dir: Path) -> list[dict]:
             if meta_path.exists():
                 related.append(meta_path)
             notes.append({
-                "source": "GreenUnivers",
+                "source": default_source,
                 "title": meta.get("title") or guess_title_from_pdf(f) or guess_title_fallback(text, fallback=f.stem),
                 "url": meta.get("url", ""),
                 "date": "",
@@ -251,12 +274,10 @@ def fetch(inbox_dir: Path) -> list[dict]:
                 if meta_path.exists():
                     related.append(meta_path)
                 notes.append({
-                    # Par défaut "GreenUnivers" (note tapée à la main pour
-                    # l'onglet "Veille automatique", voir README section 3) ;
-                    # surchargeable via .meta.json pour une source externe
-                    # scrapée/collée dans l'onglet "Résumés PDF" (voir
-                    # pdf_solo.add_web_note).
-                    "source": meta.get("source") or "GreenUnivers",
+                    # Par défaut `default_source` (note tapée à la main, voir
+                    # README section 3) ; surchargeable via .meta.json pour
+                    # un lien scrapé/texte collé (voir add_web_note ci-dessus).
+                    "source": meta.get("source") or default_source,
                     "title": meta.get("title") or f.stem,
                     "url": meta.get("url", ""),
                     "date": "",
@@ -275,9 +296,7 @@ def archive_processed(
     les repasser la semaine suivante, tout en gardant une trace. Le
     .meta.json qui accompagne un PDF (titre/lien forcés) n'a plus d'utilité
     une fois la veille générée : on le supprime plutôt que de l'archiver, pour
-    ne garder que le PDF dans l'archive. `subdir` permet de séparer les PDF
-    de la veille filtrée (in_scope/priorité) de ceux de l'onglet "Résumés PDF"
-    (pas de filtrage, voir pdf_solo.py) sans dupliquer cette fonction."""
+    ne garder que le PDF dans l'archive."""
     dest_dir = archive_root / subdir / run_date.isoformat()
     dest_dir.mkdir(parents=True, exist_ok=True)
     for note in notes:

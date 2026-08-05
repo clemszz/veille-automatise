@@ -1,5 +1,6 @@
 """Configuration centrale de la veille hebdomadaire ENGIE Green."""
 import os
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -14,7 +15,18 @@ truststore.inject_into_ssl()
 
 from dotenv import load_dotenv  # noqa: E402
 
-BASE_DIR = Path(__file__).parent
+# Une fois figé en .exe par PyInstaller (voir build_exe.bat), le process
+# décompresse le code dans un dossier temporaire à chaque lancement :
+# Path(__file__).parent pointerait alors vers ce dossier jetable, pas vers le
+# dossier où se trouve réellement l'exe — on perdrait le .env, les PDF
+# déposés, l'archive et le cache à chaque redémarrage. sys.executable, lui,
+# pointe toujours vers l'emplacement réel de l'exe (voir sys.frozen, positionné
+# par PyInstaller). En mode développement (script .py lancé directement),
+# sys.frozen n'existe pas : le comportement habituel est inchangé.
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env")
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
@@ -23,19 +35,22 @@ MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "5000"))
 
 INBOX_GREENUNIVERS = BASE_DIR / "inbox_greenunivers"
+# PDF de communication interne/officielle ENGIE (envoyés par le service Comm) :
+# file d'attente séparée de GreenUnivers, toujours priorité P1 et thème parmi
+# ENGIE/ENGIE R&B/ACTU GENERALE ENERGIE (voir summarize_mistral.classify_comm_notes,
+# main.build_draft).
+INBOX_COMM = BASE_DIR / "inbox_comm"
+COMM_SOURCE_LABEL = "Communication ENGIE"
 ARCHIVE_DIR = BASE_DIR / "archive"
 
-# Onglet "Résumés PDF" (webapp) : dépôt de PDF sans filtrage in_scope/priorité
-# ni fusion avec Tecsol/PV Magazine — l'utilisateur choisit déjà les PDF en
-# les déposant, seuls titre/résumé sont automatisés. Dossiers séparés de ceux
-# de l'onglet "Veille automatique" pour ne pas mélanger les deux workflows.
-INBOX_PDF_SOLO = BASE_DIR / "inbox_pdf_solo"
-PDF_SOLO_ARCHIVE_SUBDIR = "pdf_solo"
-PDF_SOLO_CACHE_PATH = BASE_DIR / ".cache" / "pdf_solo.json"
-
 # Classeur de suivi manuel préexistant (un onglet, une ligne par actu classée
-# par thème) : le dossier parent de veille-engie-green/, déposé par l'utilisateur.
-TRACKER_XLSX_PATH = BASE_DIR.parent / "Veille_marché_ENR.xlsx"
+# par thème). En développement : le dossier parent de stratia/, tel
+# que déposé par l'utilisateur. Dans le paquet distribué à un collègue (voir
+# build_exe.bat) : à côté de l'exe, dans le même dossier — plus simple à livrer
+# qu'une arborescence à deux niveaux. Surchargeable via .env (TRACKER_XLSX_PATH)
+# si un collègue préfère pointer vers un classeur situé ailleurs.
+_default_tracker_dir = BASE_DIR if getattr(sys, "frozen", False) else BASE_DIR.parent
+TRACKER_XLSX_PATH = Path(os.getenv("TRACKER_XLSX_PATH") or (_default_tracker_dir / "Veille_marché_ENR.xlsx"))
 TRACKER_SHEET_NAME = "Suivi veille"
 # Colonnes 1-indexées telles qu'observées dans le classeur existant.
 TRACKER_COL_THEMES = 1       # acteur (ex. "EDF") ou "DIVERS/ <sujet>"
